@@ -44,8 +44,6 @@ BAD_EXCHANGES = {
 }
 
 MAP_EXCHANGE_CHILDCLASS = {
-    "binanceus": "binance",
-    "binanceusdm": "binance",
     "okex": "okx",
     "gateio": "gate",
     "huboi": "htx",
@@ -53,6 +51,8 @@ MAP_EXCHANGE_CHILDCLASS = {
 
 SUPPORTED_EXCHANGES = [
     "binance",
+    "binanceus",
+    "binanceusdm",
     "bingx",
     "bitmart",
     "bitget",
