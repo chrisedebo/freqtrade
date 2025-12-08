@@ -979,9 +979,9 @@ class Exchange:
              swap.linear.fetchOHLCV.limit
         """
         feat = (
-            self._api_async.features.get("spot", {})
+            self._api_async.features.get("spot", {}) or {}
             if market_type == "spot"
-            else self._api_async.features.get("swap", {}).get("linear", {})
+            else (self._api_async.features.get("swap", {}) or {}).get("linear", {}) or {}
         )
 
         return feat.get(endpoint, {}).get(attribute, default)

@@ -49,7 +49,7 @@ class BasePyTorchRegressor(BasePyTorchModel):
         )
         self.model.model.eval()
         y = self.model.model(x)
-        pred_df = DataFrame(y.detach().tolist(), columns=[dk.label_list[0]])
+        pred_df = DataFrame(y.detach().tolist(), columns=dk.label_list)
         pred_df, _, _ = dk.label_pipeline.inverse_transform(pred_df)
 
         if dk.feature_pipeline["di"]:
