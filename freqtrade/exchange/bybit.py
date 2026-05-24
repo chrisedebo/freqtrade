@@ -35,11 +35,12 @@ class Bybit(Exchange):
             # TODO: Can be removed once bybit fully forces all accounts to unified mode.
             "fetchOrder": False,
         },
+        # Demo trading
+        # https://learn.bybit.com/en/bybit-guide/how-to-use-bybit-demo-trading
+        "supports_demo_trading": True,
     }
     _ft_has_futures: FtHas = {
         "ohlcv_has_history": True,
-        "mark_ohlcv_timeframe": "4h",
-        "funding_fee_timeframe": "8h",
         "funding_fee_candle_limit": 200,
         "stoploss_on_exchange": True,
         "stoploss_order_types": {"limit": "limit", "market": "market"},

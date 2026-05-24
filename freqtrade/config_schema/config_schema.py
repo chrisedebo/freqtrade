@@ -236,6 +236,10 @@ CONF_SCHEMA = {
             "type": "string",
             "enum": BACKTEST_CACHE_AGE,
         },
+        "skip_wallet_history_migration": {
+            "description": "Disable wallet history migration.",
+            "type": "boolean",
+        },
         # Hyperopt
         "hyperopt_path": {
             "description": "Specify additional lookup path for Hyperopt Loss functions.",
@@ -752,6 +756,8 @@ CONF_SCHEMA = {
                 "jwt_secret_key": {
                     "description": "Secret key for JWT authentication.",
                     "type": "string",
+                    "default": "somethingRandomSomethingRandom123",
+                    "minLength": 32,
                 },
                 "CORS_origins": {
                     "description": "List of allowed CORS origins.",
@@ -764,7 +770,14 @@ CONF_SCHEMA = {
                     "enum": ["error", "info"],
                 },
             },
-            "required": ["enabled", "listen_ip_address", "listen_port", "username", "password"],
+            "required": [
+                "enabled",
+                "listen_ip_address",
+                "listen_port",
+                "username",
+                "password",
+                "jwt_secret_key",
+            ],
         },
         # end of RPC section
         "db_url": {

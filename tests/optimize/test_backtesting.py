@@ -221,6 +221,9 @@ def test_setup_bt_configuration_with_arguments(mocker, default_conf, caplog) -> 
     assert "exportfilename" in config
     assert isinstance(config["exportfilename"], Path)
     assert log_has("Storing backtest results to {} ...".format(config["exportfilename"]), caplog)
+    assert log_has_re(
+        "DEPRECATED: Using `--export-filename` has no impact when backtesting.*", caplog
+    )
 
     assert "fee" in config
     assert log_has("Parameter --fee detected, setting fee to: {} ...".format(config["fee"]), caplog)
@@ -754,10 +757,12 @@ def test_backtest__check_trade_exit(default_conf, mocker) -> None:
 def test_backtest_one(default_conf, mocker, testdatadir) -> None:
     default_conf["use_exit_signal"] = False
     default_conf["max_open_trades"] = 10
+    default_conf["runmode"] = RunMode.BACKTEST
 
     patch_exchange(mocker)
     mocker.patch(f"{EXMS}.get_min_pair_stake_amount", return_value=0.00001)
     mocker.patch(f"{EXMS}.get_max_pair_stake_amount", return_value=float("inf"))
+    mocker.patch(f"{EXMS}.get_pair_base_currency", lambda _, x: x.split("/")[0])
     backtesting = Backtesting(default_conf)
     backtesting._set_strategy(backtesting.strategylist[0])
     pair = "UNITTEST/BTC"
@@ -855,6 +860,9 @@ def test_backtest_one(default_conf, mocker, testdatadir) -> None:
             "funding_fees": [0.0, 0.0],
         }
     )
+    # TODO: pandas3 - create correctly above ?!?
+    expected["open_date"] = expected["open_date"].astype("datetime64[ms, UTC]")
+    expected["close_date"] = expected["close_date"].astype("datetime64[ms, UTC]")
     pd.testing.assert_frame_equal(results, expected)
     assert "orders" in results.columns
     data_pair = processed[pair]
@@ -872,13 +880,23 @@ def test_backtest_one(default_conf, mocker, testdatadir) -> None:
             ln1.iloc[0]["low"], 6
         ) < round(t["close_rate"], 6) < round(ln1.iloc[0]["high"], 6)
 
+    wallet_summary = result["wallet_summary"]
+    assert isinstance(wallet_summary, pd.DataFrame)
+    assert len(wallet_summary) == 255
+    unique_currencies = wallet_summary["currency"].value_counts()
+    assert unique_currencies["BTC"] == 200
+    assert unique_currencies["UNITTEST"] == 55
+
 
 @pytest.mark.parametrize("use_detail", [True, False])
 def test_backtest_one_detail(default_conf_usdt, mocker, testdatadir, use_detail) -> None:
     default_conf_usdt["use_exit_signal"] = False
+    default_conf_usdt["runmode"] = RunMode.BACKTEST
     patch_exchange(mocker)
     mocker.patch(f"{EXMS}.get_min_pair_stake_amount", return_value=0.00001)
     mocker.patch(f"{EXMS}.get_max_pair_stake_amount", return_value=float("inf"))
+    mocker.patch(f"{EXMS}.get_pair_base_currency", lambda _, x: x.split("/")[0])
+
     default_conf_usdt["unfilledtimeout"] = {
         "entry": 11,
         "exit": 30,
@@ -965,13 +983,19 @@ def test_backtest_one_detail(default_conf_usdt, mocker, testdatadir, use_detail)
         )
 
     assert late_entry > 0
+    wallet_summary = result["wallet_summary"]
+    assert isinstance(wallet_summary, pd.DataFrame)
+    assert len(wallet_summary) == 591 if use_detail else 597
+    unique_currencies = wallet_summary["currency"].value_counts()
+    assert unique_currencies["USDT"] == 576
+    assert unique_currencies["XRP"] == 15 if use_detail else 21
 
 
 @pytest.mark.parametrize(
     "use_detail,exp_funding_fee, exp_ff_updates",
     [
-        (True, -0.018054162, 10),
-        (False, -0.01780296, 6),
+        (True, -0.0180457882, 15),
+        (False, -0.0178000543, 12),
     ],
 )
 def test_backtest_one_detail_futures(
@@ -1081,8 +1105,8 @@ def test_backtest_one_detail_futures(
 @pytest.mark.parametrize(
     "use_detail,entries,max_stake,ff_updates,expected_ff",
     [
-        (True, 50, 3000, 55, -1.18038144),
-        (False, 6, 360, 11, -0.14679994),
+        (True, 50, 3000, 78, -1.17988972),
+        (False, 6, 360, 34, -0.14673681),
     ],
 )
 def test_backtest_one_detail_futures_funding_fees(
@@ -1343,11 +1367,11 @@ def test_backtest_pricecontours_protections(default_conf, fee, mocker, testdatad
     mocker.patch(f"{EXMS}.get_min_pair_stake_amount", return_value=0.00001)
     mocker.patch(f"{EXMS}.get_max_pair_stake_amount", return_value=float("inf"))
     tests = [
-        ["sine", 9],
-        ["raise", 10],
+        ["sine", 10],
+        ["raise", 11],
         ["lower", 0],
-        ["sine", 9],
-        ["raise", 10],
+        ["sine", 10],
+        ["raise", 11],
     ]
     backtesting = Backtesting(default_conf)
     backtesting._set_strategy(backtesting.strategylist[0])
@@ -1377,11 +1401,11 @@ def test_backtest_pricecontours_protections(default_conf, fee, mocker, testdatad
         (None, "lower", 0),
         (None, "sine", 35),
         (None, "raise", 19),
-        ([{"method": "CooldownPeriod", "stop_duration": 3}], "sine", 9),
-        ([{"method": "CooldownPeriod", "stop_duration": 3}], "raise", 10),
+        ([{"method": "CooldownPeriod", "stop_duration": 3}], "sine", 10),
+        ([{"method": "CooldownPeriod", "stop_duration": 3}], "raise", 11),
         ([{"method": "CooldownPeriod", "stop_duration": 3}], "lower", 0),
-        ([{"method": "CooldownPeriod", "stop_duration": 3}], "sine", 9),
-        ([{"method": "CooldownPeriod", "stop_duration": 3}], "raise", 10),
+        ([{"method": "CooldownPeriod", "stop_duration": 3}], "sine", 10),
+        ([{"method": "CooldownPeriod", "stop_duration": 3}], "raise", 11),
     ],
 )
 def test_backtest_pricecontours(
@@ -1885,7 +1909,9 @@ def test_backtest_multi_pair_long_short_switch(
     if use_detail:
         default_conf_usdt["timeframe_detail"] = "1m"
 
-    mocker.patch(f"{EXMS}.price_to_precision", lambda s, x, y, **kwargs: y)
+    mocker.patch(
+        "freqtrade.optimize.backtesting.price_to_precision", lambda price, *args, **kwargs: price
+    )
     mocker.patch(f"{EXMS}.get_min_pair_stake_amount", return_value=0.00001)
     mocker.patch(f"{EXMS}.get_max_pair_stake_amount", return_value=float("inf"))
     mocker.patch(f"{EXMS}.get_fee", fee)
@@ -2382,13 +2408,12 @@ def test_backtest_start_nomock_futures(default_conf_usdt, mocker, caplog, testda
         f"Using data directory: {testdatadir} ...",
         "Loading data from 2021-11-17 01:00:00 up to 2021-11-21 04:00:00 (4 days).",
         "Backtesting with data from 2021-11-17 21:00:00 up to 2021-11-21 04:00:00 (3 days).",
-        "XRP/USDT:USDT, funding_rate, 8h, data starts at 2021-11-18 00:00:00",
-        "XRP/USDT:USDT, mark, 8h, data starts at 2021-11-18 00:00:00",
+        "XRP/USDT:USDT, funding_rate, 1h, data starts at 2021-11-18 00:00:00",
         f"Running backtesting for Strategy {CURRENT_TEST_STRATEGY}",
     ]
 
     for line in exists:
-        assert log_has(line, caplog)
+        assert log_has(line, caplog), line
 
     captured = capsys.readouterr()
     assert "BACKTESTING REPORT" in captured.out

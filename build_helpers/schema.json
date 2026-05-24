@@ -283,6 +283,10 @@
         "month"
       ]
     },
+    "skip_wallet_history_migration": {
+      "description": "Disable wallet history migration.",
+      "type": "boolean"
+    },
     "hyperopt_path": {
       "description": "Specify additional lookup path for Hyperopt Loss functions.",
       "type": "string"
@@ -649,6 +653,7 @@
               "ProducerPairList",
               "RemotePairList",
               "MarketCapPairList",
+              "CrossMarketPairList",
               "AgeFilter",
               "DelistFilter",
               "FullTradesFilter",
@@ -1057,7 +1062,9 @@
         },
         "jwt_secret_key": {
           "description": "Secret key for JWT authentication.",
-          "type": "string"
+          "type": "string",
+          "default": "somethingRandomSomethingRandom123",
+          "minLength": 32
         },
         "CORS_origins": {
           "description": "List of allowed CORS origins.",
@@ -1080,7 +1087,8 @@
         "listen_ip_address",
         "listen_port",
         "username",
-        "password"
+        "password",
+        "jwt_secret_key"
       ]
     },
     "db_url": {

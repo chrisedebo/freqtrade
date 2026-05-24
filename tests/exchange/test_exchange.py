@@ -1,5 +1,6 @@
 import copy
 import logging
+import re
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from random import randint
@@ -346,6 +347,22 @@ def test_validate_freqai_compat(default_conf, mocker, caplog):
     ex.validate_freqai(default_conf)
     default_conf["freqai"] = {"enabled": False}
     ex.validate_freqai(default_conf)
+
+
+def test_validate_demo_trading(default_conf_usdt, mocker, caplog):
+    # Test - nothing enabled so nothing happens
+    ex = get_patched_exchange(mocker, default_conf_usdt, exchange="kraken")
+    ex.validate_demo_trading(default_conf_usdt["exchange"])
+
+    default_conf_usdt["exchange"]["demo_trading"] = True
+    with pytest.raises(ConfigurationError, match=r"Demo trading is not supported for .*"):
+        ex.validate_demo_trading(default_conf_usdt["exchange"])
+
+    msg = r"Demo trading enabled for .*"
+    assert not log_has_re(msg, caplog)
+    ex_bybit = get_patched_exchange(mocker, default_conf_usdt, exchange="bybit")
+    ex_bybit.validate_demo_trading(default_conf_usdt["exchange"])
+    assert log_has_re(msg, caplog)
 
 
 @pytest.mark.parametrize(
@@ -960,7 +977,8 @@ def test_validate_ordertypes_stop_advanced(default_conf, mocker, exchange_name, 
         ExchangeResolver.load_exchange(default_conf)
     else:
         with pytest.raises(
-            OperationalException, match=r"On exchange stoploss price type is not supported for .*"
+            OperationalException,
+            match=r"On exchange stoploss price type '.*' is not supported for .*",
         ):
             ExchangeResolver.load_exchange(default_conf)
 
@@ -1012,7 +1030,7 @@ def test_validate_required_startup_candles(default_conf, mocker, caplog):
     ex._ft_has["ohlcv_has_history"] = False
     with pytest.raises(
         OperationalException,
-        match=r"This strategy requires 2500.*, " r"which is more than the amount.*",
+        match=r"This strategy requires 2500.*, " r"which is more than .* the amount",
     ):
         ex.validate_required_startup_candles(2500, "5m")
 
@@ -1058,6 +1076,24 @@ def test_create_dry_run_order(default_conf, mocker, side, exchange_name, leverag
     assert order["symbol"] == "ETH/BTC"
     assert order["amount"] == 1
     assert order["cost"] == 1 * 200
+
+
+def test_create_dry_run_order_id_unique_with_same_timestamp(default_conf, mocker, time_machine):
+    exchange = get_patched_exchange(mocker, default_conf)
+
+    time_machine.move_to("2026-04-27T04:49:57.438232Z", tick=False)
+    order1 = exchange.create_dry_run_order(
+        pair="ETH/USDT", ordertype="limit", side="sell", amount=1, rate=2.05, leverage=1.0
+    )
+    order2 = exchange.create_dry_run_order(
+        pair="ETH/USDT", ordertype="limit", side="sell", amount=1, rate=2.05, leverage=1.0
+    )
+
+    assert order1["id"] != order2["id"]
+    assert re.match(
+        r"^dry_run_sell_ETH/USDT_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        order1["id"],
+    )
 
 
 @pytest.mark.parametrize(
@@ -1272,6 +1308,10 @@ def test_check_dry_limit_order_filled_stoploss(
         "ft_order_type": "stoploss",
         "stopLossPrice": 24.5,
     }
+    if immediate and crossed:
+        with pytest.raises(InvalidOrderException, match=r".*Stoploss would trigger immediately.*"):
+            exchange.check_dry_limit_order_filled(order, immediate=immediate)
+        return
 
     result = exchange.check_dry_limit_order_filled(order, immediate=immediate)
 
@@ -1369,6 +1409,59 @@ def test_create_dry_run_order_limit_fill(
     mocker.patch(f"{EXMS}.fetch_l2_order_book", return_value={"asks": [], "bids": []})
     exchange._dry_run_open_orders[order["id"]]["status"] = "open"
     order_closed = exchange.fetch_dry_run_order(order["id"])
+
+
+@pytest.mark.parametrize(
+    "side,price,error",
+    [
+        # order_book_l2_usd spread:
+        # best ask: 25.566
+        # best bid: 25.563
+        ("sell", 22.0, False),
+        ("sell", 25.55, False),
+        ("sell", 26.00, True),
+        ("buy", 30.0, False),
+        ("buy", 25.57, False),
+        ("buy", 22.57, True),
+    ],
+)
+@pytest.mark.parametrize("exchange_name", EXCHANGES)
+def test_create_dry_run_order_stoploss(
+    default_conf_usdt,
+    mocker,
+    exchange_name,
+    order_book_l2_usd,
+    side,
+    price,
+    error,
+):
+    default_conf_usdt["dry_run"] = True
+    exchange = get_patched_exchange(mocker, default_conf_usdt, exchange=exchange_name)
+    if not exchange.get_option("stoploss_on_exchange"):
+        pytest.skip(f"{exchange_name} does not support on exchange stoploss orders")
+
+    mocker.patch.multiple(
+        EXMS,
+        exchange_has=MagicMock(return_value=True),
+        fetch_l2_order_book=order_book_l2_usd,
+    )
+    params = {
+        "pair": "LTC/USDT",
+        "amount": 1,
+        "stop_price": price,
+        "order_types": {"stoploss": "limit"},
+        "side": side,
+        "leverage": 1.0,
+    }
+    if not error:
+        order = exchange.create_stoploss(**params)
+        assert isinstance(order, dict)
+        assert order.get("ft_order_type") == "stoploss"
+        assert order["status"] == "open"
+        # assert order["price"] == price
+    else:
+        with pytest.raises(InvalidOrderException, match=r".*Stoploss would trigger immediately.*"):
+            exchange.create_stoploss(**params)
 
 
 @pytest.mark.parametrize(
@@ -1911,6 +2004,7 @@ def test_fetch_orders(default_conf, mocker, exchange_name, limit_order):
 
     api_mock.fetch_orders = MagicMock(side_effect=return_value)
     api_mock.fetch_open_orders = MagicMock(return_value=[limit_order["buy"]])
+    api_mock.fetch_canceled_orders = MagicMock(return_value=[])
     api_mock.fetch_closed_orders = MagicMock(return_value=[limit_order["buy"]])
 
     mocker.patch(f"{EXMS}.exchange_has", return_value=True)
@@ -1943,6 +2037,8 @@ def test_fetch_orders(default_conf, mocker, exchange_name, limit_order):
             return True
         if endpoint == "fetchOpenOrders":
             return True
+        if endpoint == "fetchCanceledOrders":
+            return True
 
     if exchange_name == "okx":
         # Special OKX case is tested separately
@@ -1955,6 +2051,7 @@ def test_fetch_orders(default_conf, mocker, exchange_name, limit_order):
     assert api_mock.fetch_orders.call_count == 0
     assert api_mock.fetch_open_orders.call_count == expected
     assert api_mock.fetch_closed_orders.call_count == expected
+    assert api_mock.fetch_canceled_orders.call_count == expected
 
     mocker.patch(f"{EXMS}.exchange_has", return_value=True)
 
@@ -1974,12 +2071,77 @@ def test_fetch_orders(default_conf, mocker, exchange_name, limit_order):
     api_mock.fetch_orders = MagicMock(side_effect=ccxt.NotSupported())
     api_mock.fetch_open_orders.reset_mock()
     api_mock.fetch_closed_orders.reset_mock()
+    api_mock.fetch_canceled_orders.reset_mock()
 
     exchange.fetch_orders("mocked", start_time)
 
     assert api_mock.fetch_orders.call_count == expected
     assert api_mock.fetch_open_orders.call_count == expected
     assert api_mock.fetch_closed_orders.call_count == expected
+    assert api_mock.fetch_canceled_orders.call_count == expected
+
+
+@pytest.mark.parametrize("exchange_name", [ex for ex in EXCHANGES if ex != "bybit"])
+@pytest.mark.parametrize(
+    "call_config, expected",
+    [
+        # call_config: (fetch_orders, fetch_open, fetch_closed, fetch_canceled)
+        # expected: (fetch_orders_calls, fetch_open_calls, fetch_closed_calls, fetch_canceled_calls)
+        ((True, False, False, False), (1, 0, 0, 0)),
+        ((False, True, True, False), (0, 1, 1, 0)),
+        ((False, True, False, True), (0, 1, 0, 1)),
+        ((False, True, True, True), (0, 1, 1, 1)),
+    ],
+)
+def test_fetch_orders_multi(
+    default_conf, mocker, exchange_name, limit_order, call_config, expected
+):
+    default_conf["dry_run"] = False
+    api_mock = MagicMock()
+    call_count = 1
+
+    def return_value(*args, **kwargs):
+        nonlocal call_count
+        call_count += 2
+        return [
+            {**limit_order["buy"], "id": call_count},
+            {**limit_order["sell"], "id": call_count + 1},
+        ]
+
+    api_mock.fetch_orders = MagicMock(side_effect=return_value)
+    api_mock.fetch_open_orders = MagicMock(return_value=[limit_order["buy"]])
+    api_mock.fetch_canceled_orders = MagicMock(return_value=[limit_order["sell"]])
+    api_mock.fetch_closed_orders = MagicMock(return_value=[limit_order["buy"]])
+
+    mocker.patch(f"{EXMS}.exchange_has", return_value=True)
+    start_time = datetime.now(UTC) - timedelta(days=20)
+
+    exchange = get_patched_exchange(mocker, default_conf, api_mock, exchange=exchange_name)
+
+    def has_resp(_, endpoint):
+
+        if endpoint == "fetchOrders":
+            return call_config[0]
+        if endpoint == "fetchClosedOrders":
+            return call_config[2]
+        if endpoint == "fetchOpenOrders":
+            return call_config[1]
+        if endpoint == "fetchCanceledOrders":
+            return call_config[3]
+
+    if exchange_name == "okx":
+        # Special OKX case is tested separately
+        return
+
+    mocker.patch(f"{EXMS}.exchange_has", has_resp)
+
+    #
+    resp = exchange.fetch_orders("mocked", start_time)
+    assert api_mock.fetch_orders.call_count == expected[0]
+    assert api_mock.fetch_open_orders.call_count == expected[1]
+    assert api_mock.fetch_closed_orders.call_count == expected[2]
+    assert api_mock.fetch_canceled_orders.call_count == expected[3]
+    assert len(resp) == 2 * expected[0] + expected[1] + expected[2] + expected[3]
 
 
 def test_fetch_trading_fees(default_conf, mocker):
@@ -2389,6 +2551,7 @@ async def test__async_get_historic_ohlcv(default_conf, mocker, caplog, exchange_
         ]
     ]
     exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
+    mocker.patch.object(exchange, "verify_candle_type_support")
     # Monkey-patch async function
     exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
 
@@ -2439,6 +2602,7 @@ def test_refresh_latest_ohlcv(mocker, default_conf_usdt, caplog, candle_type) ->
 
     caplog.set_level(logging.DEBUG)
     exchange = get_patched_exchange(mocker, default_conf_usdt)
+    mocker.patch.object(exchange, "verify_candle_type_support")
     exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
 
     pairs = [("IOTA/USDT", "5m", candle_type), ("XRP/USDT", "5m", candle_type)]
@@ -2689,6 +2853,7 @@ def test_refresh_latest_ohlcv_cache(mocker, default_conf, candle_type, time_mach
     time_machine.move_to(start + timedelta(hours=99, minutes=30))
 
     exchange = get_patched_exchange(mocker, default_conf)
+    mocker.patch.object(exchange, "verify_candle_type_support")
     exchange._set_startup_candle_count(default_conf)
 
     mocker.patch(f"{EXMS}.ohlcv_candle_limit", return_value=100)
@@ -2791,8 +2956,10 @@ def test_refresh_ohlcv_with_cache(mocker, default_conf, time_machine) -> None:
         ("LTC/BTC", "1h", CandleType.SPOT),
     ]
 
-    ohlcv_data = {p: ohlcv for p in pairs}
-    ohlcv_mock = mocker.patch(f"{EXMS}.refresh_latest_ohlcv", return_value=ohlcv_data)
+    def ohlcv_side_effect(requested_pairs, *args, **kwargs):
+        return {p: ohlcv for p in requested_pairs}
+
+    ohlcv_mock = mocker.patch(f"{EXMS}.refresh_latest_ohlcv", side_effect=ohlcv_side_effect)
     mocker.patch(f"{EXMS}.ohlcv_candle_limit", return_value=100)
     exchange = get_patched_exchange(mocker, default_conf)
 
@@ -2810,6 +2977,14 @@ def test_refresh_ohlcv_with_cache(mocker, default_conf, time_machine) -> None:
     ohlcv_mock.reset_mock()
     res = exchange.refresh_ohlcv_with_cache(pairs, start.timestamp())
     assert ohlcv_mock.call_count == 0
+    assert len(res) == 5
+
+    # # re-run with one additional pair
+    res = exchange.refresh_ohlcv_with_cache(
+        pairs + [("NEW/PAIR", "1d", CandleType.SPOT)], start.timestamp()
+    )
+    assert ohlcv_mock.call_count == 1
+    assert len(res) == 6
 
     # Expire 5m cache
     time_machine.move_to(start + timedelta(minutes=6), tick=False)
@@ -2818,6 +2993,7 @@ def test_refresh_ohlcv_with_cache(mocker, default_conf, time_machine) -> None:
     res = exchange.refresh_ohlcv_with_cache(pairs, start.timestamp())
     assert ohlcv_mock.call_count == 1
     assert len(ohlcv_mock.call_args_list[0][0][0]) == 1
+    assert len(res) == 5
 
     # Expire 5m and 1h cache
     time_machine.move_to(start + timedelta(hours=2), tick=False)
@@ -2826,6 +3002,7 @@ def test_refresh_ohlcv_with_cache(mocker, default_conf, time_machine) -> None:
     res = exchange.refresh_ohlcv_with_cache(pairs, start.timestamp())
     assert ohlcv_mock.call_count == 1
     assert len(ohlcv_mock.call_args_list[0][0][0]) == 2
+    assert len(res) == 5
 
     # Expire all caches
     time_machine.move_to(start + timedelta(days=1, hours=2), tick=False)
@@ -2835,6 +3012,30 @@ def test_refresh_ohlcv_with_cache(mocker, default_conf, time_machine) -> None:
     assert ohlcv_mock.call_count == 1
     assert len(ohlcv_mock.call_args_list[0][0][0]) == 5
     assert ohlcv_mock.call_args_list[0][0][0] == pairs
+    assert len(res) == 5
+
+
+def test_refresh_latest_ohlcv_funding_rate(mocker, default_conf_usdt, caplog) -> None:
+    ohlcv = generate_test_data_raw("1h", 24, "2025-01-02 12:00:00+00:00")
+    funding_data = [{"timestamp": x[0], "fundingRate": x[1]} for x in ohlcv]
+
+    caplog.set_level(logging.DEBUG)
+    exchange = get_patched_exchange(mocker, default_conf_usdt)
+    exchange._api_async.fetch_ohlcv = get_mock_coro(ohlcv)
+    exchange._api_async.fetch_funding_rate_history = get_mock_coro(funding_data)
+
+    pairs = [
+        ("IOTA/USDT:USDT", "8h", CandleType.FUNDING_RATE),
+        ("XRP/USDT:USDT", "1h", CandleType.FUNDING_RATE),
+    ]
+    # empty dicts
+    assert not exchange._klines
+    res = exchange.refresh_latest_ohlcv(pairs, cache=False)
+
+    assert len(res) == len(pairs)
+    assert log_has_re(r"Wrong funding rate timeframe 8h for pair IOTA/USDT:USDT", caplog)
+    assert not log_has_re(r"Wrong funding rate timeframe 8h for pair XRP/USDT:USDT", caplog)
+    assert exchange._api_async.fetch_ohlcv.call_count == 0
 
 
 @pytest.mark.parametrize("exchange_name", EXCHANGES)
@@ -3901,37 +4102,29 @@ def test_cancel_stoploss_order(default_conf, mocker, exchange_name):
 @pytest.mark.parametrize("exchange_name", EXCHANGES)
 def test_cancel_stoploss_order_with_result(default_conf, mocker, exchange_name):
     default_conf["dry_run"] = False
-    mock_prefix = "freqtrade.exchange.gate.Gate"
-    if exchange_name == "okx":
-        mock_prefix = "freqtrade.exchange.okx.Okx"
-    mocker.patch(f"{EXMS}.fetch_stoploss_order", return_value={"for": 123})
-    mocker.patch(f"{mock_prefix}.fetch_stoploss_order", return_value={"for": 123})
     exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
+    mocker.patch.object(exchange, "fetch_stoploss_order", return_value={"for": 123})
 
     res = {"fee": {}, "status": "canceled", "amount": 1234}
-    mocker.patch(f"{EXMS}.cancel_stoploss_order", return_value=res)
-    mocker.patch(f"{mock_prefix}.cancel_stoploss_order", return_value=res)
+    mocker.patch.object(exchange, "cancel_stoploss_order", return_value=res)
     co = exchange.cancel_stoploss_order_with_result(order_id="_", pair="TKN/BTC", amount=555)
     assert co == res
 
-    mocker.patch(f"{EXMS}.cancel_stoploss_order", return_value="canceled")
-    mocker.patch(f"{mock_prefix}.cancel_stoploss_order", return_value="canceled")
+    mocker.patch.object(exchange, "cancel_stoploss_order", return_value="canceled")
     # Fall back to fetch_stoploss_order
     co = exchange.cancel_stoploss_order_with_result(order_id="_", pair="TKN/BTC", amount=555)
     assert co == {"for": 123}
 
     exc = InvalidOrderException("")
-    mocker.patch(f"{EXMS}.fetch_stoploss_order", side_effect=exc)
-    mocker.patch(f"{mock_prefix}.fetch_stoploss_order", side_effect=exc)
+    mocker.patch.object(exchange, "fetch_stoploss_order", side_effect=exc)
     co = exchange.cancel_stoploss_order_with_result(order_id="_", pair="TKN/BTC", amount=555)
     assert co["amount"] == 555
     assert co == {"id": "_", "fee": {}, "status": "canceled", "amount": 555, "info": {}}
 
     with pytest.raises(InvalidOrderException):
         exc = InvalidOrderException("Did not find order")
-        mocker.patch(f"{EXMS}.cancel_stoploss_order", side_effect=exc)
-        mocker.patch(f"{mock_prefix}.cancel_stoploss_order", side_effect=exc)
         exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
+        mocker.patch.object(exchange, "cancel_stoploss_order", side_effect=exc)
         exchange.cancel_stoploss_order_with_result(order_id="_", pair="TKN/BTC", amount=123)
 
 
@@ -4116,7 +4309,7 @@ def test_fetch_order_or_stoploss_order(default_conf, mocker):
     fetch_order_mock = MagicMock()
     fetch_stoploss_order_mock = MagicMock()
     mocker.patch.multiple(
-        EXMS,
+        exchange,
         fetch_order=fetch_order_mock,
         fetch_stoploss_order=fetch_stoploss_order_mock,
     )
@@ -4138,11 +4331,28 @@ def test_fetch_order_or_stoploss_order(default_conf, mocker):
 
 
 @pytest.mark.parametrize("exchange_name", EXCHANGES)
-def test_name(default_conf, mocker, exchange_name):
-    exchange = get_patched_exchange(mocker, default_conf, exchange=exchange_name)
+def test_name(default_conf_usdt, mocker, exchange_name):
+    # exchange = get_patched_exchange(mocker, default_conf_usdt, exchange=exchange_name)
+    api_mock = MagicMock()
+    api_mock.name = exchange_name.title()
+    api_mock.id = exchange_name
+    mocker.patch(f"{EXMS}._init_ccxt", MagicMock(return_value=api_mock))
+    mocker.patch(f"{EXMS}._load_async_markets")
+    # mocker.patch(f"{EXMS}.validate_timeframes")
+    # mocker.patch(f"{EXMS}.validate_stakecurrency")
+    # mocker.patch(f"{EXMS}.validate_pricing")
+    default_conf_usdt["exchange"]["name"] = "exchange_name"
+    exchange = ExchangeResolver.load_exchange(default_conf_usdt, validate=False)
 
     assert exchange.name == exchange_name.title()
     assert exchange.id == exchange_name
+
+    default_conf_usdt["exchange"]["demo_trading"] = True
+
+    exchange_demo = ExchangeResolver.load_exchange(default_conf_usdt, validate=False)
+
+    assert exchange_demo.name == f"{exchange_name.title()} (Demo)"
+    assert exchange_demo.id == f"{exchange_name}_demo"
 
 
 @pytest.mark.parametrize(
@@ -5186,19 +5396,16 @@ def test_get_max_leverage_from_margin(default_conf, mocker, pair, nominal_value,
 
 
 @pytest.mark.parametrize(
-    "size,funding_rate,mark_price,time_in_ratio,funding_fee,kraken_fee",
+    "size,funding_rate,mark_price,funding_fee",
     [
-        (10, 0.0001, 2.0, 1.0, 0.002, 0.002),
-        (10, 0.0002, 2.0, 0.01, 0.004, 0.00004),
-        (10, 0.0002, 2.5, None, 0.005, None),
-        (10, 0.0002, nan, None, 0.0, None),
+        (10, 0.0001, 2.0, 0.002),
+        (10, 0.0002, 2.0, 0.004),
+        (10, 0.0002, 2.5, 0.005),
+        (10, 0.0002, nan, 0.0),
     ],
 )
-def test_calculate_funding_fees(
-    default_conf, mocker, size, funding_rate, mark_price, funding_fee, kraken_fee, time_in_ratio
-):
+def test_calculate_funding_fees(default_conf, mocker, size, funding_rate, mark_price, funding_fee):
     exchange = get_patched_exchange(mocker, default_conf)
-    kraken = get_patched_exchange(mocker, default_conf, exchange="kraken")
     prior_date = timeframe_to_prev_date("1h", datetime.now(UTC) - timedelta(hours=1))
     trade_date = timeframe_to_prev_date("1h", datetime.now(UTC))
     funding_rates = DataFrame(
@@ -5222,34 +5429,9 @@ def test_calculate_funding_fees(
             is_short=True,
             open_date=trade_date,
             close_date=trade_date,
-            time_in_ratio=time_in_ratio,
         )
         == funding_fee
     )
-
-    if kraken_fee is None:
-        with pytest.raises(OperationalException):
-            kraken.calculate_funding_fees(
-                df,
-                amount=size,
-                is_short=True,
-                open_date=trade_date,
-                close_date=trade_date,
-                time_in_ratio=time_in_ratio,
-            )
-
-    else:
-        assert (
-            kraken.calculate_funding_fees(
-                df,
-                amount=size,
-                is_short=True,
-                open_date=trade_date,
-                close_date=trade_date,
-                time_in_ratio=time_in_ratio,
-            )
-            == kraken_fee
-        )
 
 
 @pytest.mark.parametrize(
@@ -5350,11 +5532,12 @@ def test_combine_funding_and_mark(
     df = exchange.combine_funding_and_mark(funding_rates, mark_rates, futures_funding_rate)
 
     if futures_funding_rate is not None:
-        assert len(df) == 3
+        assert len(df) == 2
         assert df.iloc[0]["open_fund"] == funding_rate
-        assert df.iloc[1]["open_fund"] == futures_funding_rate
-        assert df.iloc[2]["open_fund"] == funding_rate
-        assert df["date"].to_list() == [prior2_date, prior_date, trade_date]
+        # assert df.iloc[1]["open_fund"] == futures_funding_rate
+        assert df.iloc[-1]["open_fund"] == funding_rate
+        # Mid-candle is dropped ...
+        assert df["date"].to_list() == [prior2_date, trade_date]
     else:
         assert len(df) == 2
         assert df["date"].to_list() == [prior2_date, trade_date]
@@ -5448,8 +5631,13 @@ def test__fetch_and_calculate_funding_fees(
     api_mock = MagicMock()
     api_mock.fetch_funding_rate_history = get_mock_coro(return_value=funding_rate_history)
     api_mock.fetch_ohlcv = get_mock_coro(return_value=mark_ohlcv)
-    type(api_mock).has = PropertyMock(return_value={"fetchOHLCV": True})
-    type(api_mock).has = PropertyMock(return_value={"fetchFundingRateHistory": True})
+    type(api_mock).has = PropertyMock(
+        return_value={
+            "fetchFundingRateHistory": True,
+            "fetchMarkOHLCV": True,
+            "fetchOHLCV": True,
+        }
+    )
 
     ex = get_patched_exchange(mocker, default_conf, api_mock, exchange=exchange)
     mocker.patch(f"{EXMS}.timeframes", PropertyMock(return_value=["1h", "4h", "8h"]))
@@ -5493,8 +5681,13 @@ def test__fetch_and_calculate_funding_fees_datetime_called(
     api_mock.fetch_funding_rate_history = get_mock_coro(
         return_value=funding_rate_history_octohourly
     )
-    type(api_mock).has = PropertyMock(return_value={"fetchOHLCV": True})
-    type(api_mock).has = PropertyMock(return_value={"fetchFundingRateHistory": True})
+    type(api_mock).has = PropertyMock(
+        return_value={
+            "fetchFundingRateHistory": True,
+            "fetchMarkOHLCV": True,
+            "fetchOHLCV": True,
+        }
+    )
     mocker.patch(f"{EXMS}.timeframes", PropertyMock(return_value=["4h", "8h"]))
     exchange = get_patched_exchange(mocker, default_conf, api_mock, exchange=exchange)
     d1 = datetime.strptime("2021-08-31 23:00:01 +0000", "%Y-%m-%d %H:%M:%S %z")
@@ -6153,6 +6346,10 @@ def test_get_max_leverage_futures(default_conf, mocker, leverage_tiers):
     assert exchange.get_max_leverage("BTC/USDT:USDT", 300000000) == 2.0
     assert exchange.get_max_leverage("BTC/USDT:USDT", 600000000) == 1.0  # Last tier
 
+    # Test ADA - last maxNotional is None
+    assert exchange.get_max_leverage("ADA/USDT:USDT", 2500000) == 2.0  # Second last tier
+    assert exchange.get_max_leverage("ADA/USDT:USDT", 6000000) == 1.0  # Last tier, open maxNotional
+
     assert exchange.get_max_leverage("SPONGE/USDT:USDT", 200) == 1.0  # Pair not in leverage_tiers
     assert exchange.get_max_leverage("BTC/USDT:USDT", 0.0) == 125.0  # No stake amount
     with pytest.raises(
@@ -6581,3 +6778,51 @@ def test_fetch_funding_rate(default_conf, mocker, exchange_name):
 
     with pytest.raises(DependencyException, match=r"Pair XRP/ETH not available"):
         exchange.fetch_funding_rate(pair="XRP/ETH")
+
+
+def test_verify_candle_type_support(default_conf, mocker):
+    api_mock = MagicMock()
+    type(api_mock).has = PropertyMock(
+        return_value={
+            "fetchFundingRateHistory": True,
+            "fetchIndexOHLCV": True,
+            "fetchMarkOHLCV": True,
+            "fetchPremiumIndexOHLCV": False,
+        }
+    )
+    exchange = get_patched_exchange(mocker, default_conf, api_mock)
+
+    # Should pass
+    exchange.verify_candle_type_support("futures")
+    exchange.verify_candle_type_support(CandleType.FUTURES)
+    exchange.verify_candle_type_support(CandleType.FUNDING_RATE)
+    exchange.verify_candle_type_support(CandleType.SPOT)
+    exchange.verify_candle_type_support(CandleType.MARK)
+
+    # Should fail:
+
+    with pytest.raises(
+        OperationalException,
+        match=r"Exchange .* does not support fetching premiumIndex candles\.",
+    ):
+        exchange.verify_candle_type_support(CandleType.PREMIUMINDEX)
+
+    type(api_mock).has = PropertyMock(
+        return_value={
+            "fetchFundingRateHistory": False,
+            "fetchIndexOHLCV": False,
+            "fetchMarkOHLCV": False,
+            "fetchPremiumIndexOHLCV": True,
+        }
+    )
+    for candle_type in [
+        CandleType.FUNDING_RATE,
+        CandleType.INDEX,
+        CandleType.MARK,
+    ]:
+        with pytest.raises(
+            OperationalException,
+            match=rf"Exchange .* does not support fetching {candle_type.value} candles\.",
+        ):
+            exchange.verify_candle_type_support(candle_type)
+    exchange.verify_candle_type_support(CandleType.PREMIUMINDEX)
