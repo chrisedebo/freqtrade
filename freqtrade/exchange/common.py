@@ -44,7 +44,6 @@ BAD_EXCHANGES = {
 }
 
 MAP_EXCHANGE_CHILDCLASS = {
-    "okex": "okx",
     "gateio": "gate",
     "huboi": "htx",
 }
