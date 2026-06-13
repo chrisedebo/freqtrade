@@ -20,6 +20,7 @@ class Kucoinfutures(Kucoin):
         "stop_price_param": "stopPrice",
         "stop_price_prop": "stopPrice",
         "funding_fee_candle_limit": 100,
+        "mark_ohlcv_price": "futures",
         "ohlcv_candle_limit": 200,
         "tickers_have_bid_ask": True,
         "tickers_have_price": True,
