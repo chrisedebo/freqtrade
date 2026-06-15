@@ -1423,6 +1423,10 @@ class Exchange:
             params.update({"timeInForce": time_in_force.upper()})
         if reduceOnly:
             params.update({"reduceOnly": True})
+            
+        if self.name.lower() == "kucoinfutures" and self.margin_mode.value == "isolated":
+            params.update({"leverage": leverage})
+            
         return params
 
     def _order_needs_price(self, side: BuySell, ordertype: str) -> bool:
@@ -1462,7 +1466,7 @@ class Exchange:
             if not reduceOnly:
                 self._lev_prep(pair, leverage, side, accept_fail=not initial_order)
 
-            order = self._api.create_order(
+            logger.info(f"Stoploss params: {params}"); order = self._api.create_order(
                 pair,
                 ordertype,
                 side,
@@ -1610,6 +1614,9 @@ class Exchange:
             )
             if self.trading_mode == TradingMode.FUTURES:
                 params["reduceOnly"] = True
+                if "kucoin" in self.name.lower():
+                    params.pop("reduceOnly", None)
+                    params["closeOrder"] = True
                 if "stoploss_price_type" in order_types and "stop_price_type_field" in self._ft_has:
                     price_type = self._ft_has["stop_price_type_value_mapping"][
                         order_types.get("stoploss_price_type", PriceType.LAST)
@@ -1619,7 +1626,7 @@ class Exchange:
             amount = self.amount_to_precision(pair, self._amount_to_contracts(pair, amount))
 
             self._lev_prep(pair, leverage, side, accept_fail=True)
-            order = self._api.create_order(
+            logger.info(f"Stoploss params: {params}"); order = self._api.create_order(
                 symbol=pair,
                 type=ordertype,
                 side=side,
@@ -3784,6 +3791,12 @@ class Exchange:
                     f"Could not set leverage due to {e.__class__.__name__}. Message: {e}"
                 ) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            if "isolated margin" in str(e).lower():
+                logger.warning(
+                    f"KuCoin futures isolated margin prevents setting leverage dynamically for {pair}. "
+                    f"Ignoring this error, but ensure leverage is manually set on the exchange."
+                )
+                return
             raise TemporaryError(
                 f"Could not set leverage due to {e.__class__.__name__}. Message: {e}"
             ) from e
