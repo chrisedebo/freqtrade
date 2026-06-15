@@ -1424,7 +1424,7 @@ class Exchange:
         if reduceOnly:
             params.update({"reduceOnly": True})
             
-        if self.name.lower() == "kucoinfutures" and self.margin_mode.value == "isolated":
+        if self.id == "kucoinfutures" and self.margin_mode.value == "isolated":
             params.update({"leverage": leverage})
             
         return params
