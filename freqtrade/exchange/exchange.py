@@ -1711,6 +1711,14 @@ class Exchange:
             order = self._order_contracts_to_amount(order)
             return order
         except ccxt.OrderNotFound as e:
+            if self.name.lower() == 'kucoin':
+                try:
+                    order = self._api.fetch_closed_order(order_id, pair, params=params)
+                    self._log_exchange_response("fetch_closed_order", order)
+                    order = self._order_contracts_to_amount(order)
+                    return order
+                except Exception:
+                    pass
             raise RetryableOrderError(
                 f"Order not found (pair: {pair} id: {order_id}). Message: {e}"
             ) from e
