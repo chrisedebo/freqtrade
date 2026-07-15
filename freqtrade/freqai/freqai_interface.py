@@ -228,16 +228,18 @@ class IFreqaiModel(ABC):
         while not self._stop_event.is_set():
             time.sleep(1)
 
+            current_whitelist = strategy.dp.current_whitelist()
+            new_queue = []
+            for p in current_whitelist:
+                (_, trained_timestamp) = self.dd.get_pair_dict_info(p)
+                new_queue.append((p, trained_timestamp))
+            new_queue.sort(key=lambda x: x[1])
+            self.train_queue = deque([x[0] for x in new_queue])
+
             if not self.train_queue:
                 continue
 
             pair = self.train_queue[0]
-
-            # ensure pair is available in dp
-            if pair not in strategy.dp.current_whitelist():
-                self.train_queue.popleft()
-                logger.warning(f"{pair} not in current whitelist, removing from train queue.")
-                continue
 
             (_, trained_timestamp) = self.dd.get_pair_dict_info(pair)
 
@@ -251,6 +253,11 @@ class IFreqaiModel(ABC):
             if retrain:
                 self.train_timer("start")
                 dk.set_paths(pair, new_trained_timerange.stopts)
+                
+                # dynamically load history for new pairs before training
+                if self.dd.historic_data:
+                    self.dd.update_historic_data(strategy, dk)
+
                 try:
                     self.extract_data_and_train_model(
                         new_trained_timerange, pair, strategy, dk, data_load_timerange
@@ -263,8 +270,6 @@ class IFreqaiModel(ABC):
 
                 self.train_timer("stop", pair)
 
-                # only rotate the queue after the first has been trained.
-                self.train_queue.rotate(-1)
 
                 self.dd.save_historic_predictions_to_disk()
                 if self.freqai_info.get("write_metrics_to_disk", False):

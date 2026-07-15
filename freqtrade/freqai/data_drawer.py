@@ -19,7 +19,7 @@ from pandas import DataFrame
 
 from freqtrade.configuration import TimeRange
 from freqtrade.constants import Config
-from freqtrade.data.history import load_pair_history
+from freqtrade.data.history import load_pair_history, refresh_backtest_ohlcv_data
 from freqtrade.enums import CandleType
 from freqtrade.exceptions import OperationalException
 from freqtrade.freqai.data_kitchen import FreqaiDataKitchen
@@ -643,6 +643,38 @@ class FreqaiDataDrawer:
         feat_params = self.freqai_info["feature_parameters"]
         with self.history_lock:
             history_data = self.historic_data
+            
+            if dk.pair not in history_data:
+                logger.info(f"Dynamically loading history for new pair {dk.pair}")
+                history_data[dk.pair] = {}
+                (_, _, data_load_timerange) = dk.check_if_new_training_required(0)
+                new_pairs_days = int((data_load_timerange.stopts - data_load_timerange.startts) / 86400)
+                
+                logger.info(f"Downloading historical data for {dk.pair} for {new_pairs_days} days")
+                refresh_backtest_ohlcv_data(
+                    strategy.dp._exchange,
+                    pairs=[dk.pair],
+                    timeframes=feat_params.get("include_timeframes"),
+                    datadir=self.config["datadir"],
+                    timerange=data_load_timerange,
+                    new_pairs_days=new_pairs_days,
+                    erase=False,
+                    data_format=self.config.get("dataformat_ohlcv", "feather"),
+                    trading_mode=self.config.get("trading_mode", "spot"),
+                    prepend=self.config.get("prepend_data", False),
+                )
+                
+                for tf in feat_params.get("include_timeframes"):
+                    history_data[dk.pair][tf] = load_pair_history(
+                        datadir=self.config["datadir"],
+                        timeframe=tf,
+                        pair=dk.pair,
+                        timerange=data_load_timerange,
+                        data_format=self.config.get("dataformat_ohlcv", "feather"),
+                        candle_type=self.config.get("candle_type_def", CandleType.SPOT),
+                    )
+
+            self.current_candle = history_data[dk.pair][self.config["timeframe"]].iloc[-1]["date"]
 
             for pair in dk.all_pairs:
                 for tf in feat_params.get("include_timeframes"):

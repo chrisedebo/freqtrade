@@ -601,6 +601,9 @@ class FreqaiDataKitchen:
         for pair in self.config.get("exchange", "").get("pair_whitelist"):
             if pair not in self.all_pairs:
                 self.all_pairs.append(pair)
+                
+        if hasattr(self, "pair") and self.pair and self.pair not in self.all_pairs:
+            self.all_pairs.append(self.pair)
 
     def extract_corr_pair_columns_from_populated_indicators(
         self, dataframe: DataFrame
