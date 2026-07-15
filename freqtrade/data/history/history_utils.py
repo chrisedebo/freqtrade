@@ -408,11 +408,14 @@ def refresh_backtest_ohlcv_data(
         else:
             # Default behavior
             timeframes_with_candletype = [(tf, def_candletype) for tf in timeframes]
-            timeframes_with_candletype.append((tf_mark, fr_candle_type))
+            if tf_mark:
+                timeframes_with_candletype.append((tf_mark, fr_candle_type))
         if not candle_types or CandleType.FUNDING_RATE in candle_types:
             # All exchanges need FundingRate for futures trading.
             # The timeframe is aligned to the mark-price timeframe.
-            timeframes_with_candletype.append((tf_funding_rate, CandleType.FUNDING_RATE))
+            if tf_funding_rate:
+                timeframes_with_candletype.append((tf_funding_rate, CandleType.FUNDING_RATE))
+
     # Deduplicate list ...
     timeframes_with_candletype = list(dict.fromkeys(timeframes_with_candletype))
     logger.debug(
