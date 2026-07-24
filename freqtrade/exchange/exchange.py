@@ -3032,6 +3032,13 @@ class Exchange:
             ) from e
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
+        except ccxt.BadSymbol as e:
+            logger.warning(
+                f"Could not fetch historical candle (OHLCV) data for "
+                f"{pair}, {timeframe}, {candle_type} due to BadSymbol. "
+                f"Symbol may have been delisted. Message: {e}"
+            )
+            return pair, timeframe, candle_type, [], False
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
                 f"Could not fetch historical candle (OHLCV) data "

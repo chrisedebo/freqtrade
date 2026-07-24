@@ -930,7 +930,7 @@ class IFreqaiModel(ABC):
         if key_name not in self.metadata:
             metadata = self.metadata
             metadata[key_name] = int(
-                pd.to_datetime(live_dataframe.tail(1)["date"].values[0]).timestamp()
+                pd.to_datetime(live_dataframe.tail(1)["date"].values[0], utc=True).timestamp()
             )
             self.update_metadata(metadata)
 
